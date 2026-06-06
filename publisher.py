@@ -21,7 +21,7 @@ def publish_post(post_data: dict) -> bool:
     car = post_data.get("car", "Unknown")
     photo_count = post_data.get("photo_count", 1)
 
-    print(f%x\nPublishing post about {car} ({photo_count} photos)...")
+    print(f"\nPublishing post about {car} ({photo_count} photos)...")
 
     message_ids = []
 
@@ -36,10 +36,10 @@ def publish_post(post_data: dict) -> bool:
     success = bool(message_ids)
 
     if success:
-        print(f%x\nPost about {car} published! (msg_id: {message_ids})")
+        print(f"Post about {car} published! (msg_id: {message_ids})")
         analytics.save_post(car, message_ids, text, photo_count=photo_count if photo_count >= 3 else 1)
     else:
-        print(f%x\nFailed to publish post about {car}")
+        print(f"Failed to publish post about {car}")
 
     return success
 
@@ -86,11 +86,11 @@ def _publish_media_group(text: str, search_query: str) -> list:
             return [msg.message_id] if msg else []
 
         messages = bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media)
-        print(f%xMedia group of {len(messages)} photos published")
+        print(f"Media group of {len(messages)} photos published")
         return [m.message_id for m in messages]
 
     except Exception as e:
-        print(f%xMedia group error: {e}, falling back to single photo")
+        print(f"Media group error: {e}, falling back to single photo")
         msg = _publish_with_photo(text, photo_urls[0]) if photo_urls else _publish_text_only(text)
         return [msg.message_id] if msg else []
 
