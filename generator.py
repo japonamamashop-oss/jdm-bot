@@ -2,9 +2,9 @@
 #  generator.py — генерирует посты через Groq AI
 # ============================================================
 
-from groq import Groq
 import random
-from config import GROQ_API_KEY, JDM_CARS
+from groq import Groq
+from config import GROQ_API_KEY, JDM_CARS, MULTI_PHOTO_CHANCE
 from style_analyzer import get_style_prompt
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -20,38 +20,60 @@ def pick_car() -> str:
         available = JDM_CARS
     car = random.choice(available)
     _recently_used.append(car)
-    if len(_recently_used) > 5:
+    if len(_recently_used) > 7:
         _recently_used.pop(0)
     return car
 
 
-def generate_post(style_description: str, car_name: str = None) -> dict:
+def should_use_multi_photo(performance_hints: dict = None) -> bool:
+    """Определяет использовать ли несколько фото (с учётом аналитики)."""
+    if performance_hints and performance_hints.get("prefer_multi_photo"):
+        return random.random() < 0.6  # 60% если аналитика рекомендует
+    return random.random() < MULTI_PHOTO_CHANCE  # 40% по умолчанию
+
+
+def generate_post(style_description: str, car_name: str = None,
+                  performance_hints: dict = None) -> dict:
     if not car_name:
         car_name = pick_car()
 
-    style_instruction = get_style_prompt(style_description)
+    use_multi = should_use_multi_photo(performance_hints)
+    photo_count = 3 if use_multi else 1
+
+    style_instruction = get_style_prompt(style_description, performance_hints)
 
     topics = [
-        f"общий пост-знакомство с {car_name}, технические характеристики и история",
-        f"легенды и мифы вокруг {car_name}, интересные факты",
-        f"почему {car_name} стала культовой — культурное влияние",
-        f"тюнинг-потенциал {car_name}, что делает с ней энтузиасты",
-        f"сравнение эпох: {car_name} тогда и сейчас, рост цен и ценности",
-        f"гоночное наследие {car_name} — участие в соревнованиях",
+        f"общий пост-знакомство с {car_name}: история создания, технические характеристики, культовый статус",
+        f"легенды, мифы и интересные факты о {car_name} — то чего не знают большинство",
+        f"почему  {car_name} стала иконой JDM-культуры — влияние аниме, игр, кино",
+        f"тюнинг-потенциал {car_name}: популярные апгрейды и рекорды мощности",
+        f"история {car_name} на треке и в дрифте — гоночное наследие",
+        f"стоимость {car_name} тогда и сейчас — почему цены выросли и стоит ли покупать",
+        f"редкие версии и спецификации {car_name} о которых мало кто знает",
     ]
     topic = random.choice(topics)
+
+    multi_note = ""
+    if use_multi:
+        multi_note = "\nВАЖНО: к посту будет  3 фотографии. Добавь описание внешнего вида машины."
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": style_instruction},
-            {"role": "user", "content": f"Напиши пост про: {topic}. Машина: {car_name}. Пиши только на русском языке. Пост должен быть готов к публикации в Telegram."}
+            {
+                "role": "user",
+                "content": (
+                    f"Напиши пост про: {topic}. Машина: {car_name}."
+                    f"\nПиши только на русском. Пост готов к публикации."
+                    f"{multi_note}"
+                )
+            }
         ],
-        max_tokens=800,
+        max_tokens=900,
     )
 
     post_text = response.choices[0].message.content.strip()
-
     car_parts = car_name.lower().replace("-", " ").split()
     search_query = " ".join(car_parts[:4]) + " jdm japan car"
 
@@ -59,15 +81,17 @@ def generate_post(style_description: str, car_name: str = None) -> dict:
         "text": post_text,
         "car": car_name,
         "search_query": search_query,
+        "photo_count": photo_count,
     }
 
 
-def generate_post_with_retry(style_description: str, max_attempts: int = 3) -> dict:
+def generate_post_with_retry(style_description: str, performance_hints: dict = None,
+                              max_attempts: int = 3) -> dict:
     for attempt in range(max_attempts):
         try:
-            return generate_post(style_description)
+            return generate_post(style_description, performance_hints=performance_hints)
         except Exception as e:
-            print(f"⚠️  Попытка {attempt + 1}/{max_attempts} не удалась: {e}")
+            print(f"Attempt {attempt + 1}/{max_attempts} failed: {e}")
             if attempt == max_attempts - 1:
                 raise
     return {}
