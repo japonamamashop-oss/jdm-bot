@@ -1,6 +1,7 @@
 # ============================================================
 #  scheduler.py — планировщик постов каждые 2 часа
 #                 + ежедневная аналитика в 22:00
+#                 + обновление просмотров каждые 6 часов
 # ============================================================
 
 import schedule
@@ -8,9 +9,10 @@ import time
 import threading
 import telebot
 from datetime import datetime
-from config import TELEGRAM_BOT_TOKEN, POST_INTERVAL_HOURS, DAILY_ANALYTICS_HOUR
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, POST_INTERVAL_HOURS, DAILY_ANALYTICS_HOUR
 from generator import generate_post_with_retry
 from publisher import publish_post
+from style_analyzer import fetch_post_views
 import analytics
 
 _channel_style = ""
@@ -43,10 +45,27 @@ def _post_job():
         print(f"Critical error in post job: {e}")
 
 
+def _views_update_job():
+    """Обновляет просмотры для всех отслеживаемых постов."""
+    print(f"\n{'='*50}")
+    print("Updating post views from channel...")
+    try:
+        views_map = fetch_post_views(TELEGRAM_CHANNEL_ID)
+        if views_map:
+            analytics.update_views_batch(views_map)
+            print(f"Views updated for {len(views_map)} posts")
+        else:
+            print("No views data fetched")
+    except Exception as e:
+        print(f"Views update error: {e}")
+
+
 def _analytics_job():
-    """Ежедневный анализ постов."""
+    """Ежедневный анализ — сначала обновляем просмотры, потом отчёт."""
     print(f"\n{'='*50}")
     print("Running daily analytics...")
+
+    _views_update_job()
 
     report = analytics.get_daily_report()
     print(report)
@@ -68,14 +87,16 @@ def post_now():
 
 
 def start_scheduler():
-    """ӗапускает планировщик в фоновом потоке."""
+    """Запускает планировщик в фоновом потоке."""
     interval_minutes = POST_INTERVAL_HOURS * 60
 
     print(f"Scheduler started: post every {POST_INTERVAL_HOURS}h.")
     print(f"   Daily analytics at {DAILY_ANALYTICS_HOUR}:00")
+    print(f"   Views update every 6h.")
 
     schedule.every(interval_minutes).minutes.do(_post_job)
     schedule.every().day.at(f"{DAILY_ANALYTICS_HOUR:02d}:00").do(_analytics_job)
+    schedule.every(6).hours.do(_views_update_job)
 
     def run_loop():
         while True:
