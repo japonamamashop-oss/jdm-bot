@@ -1,5 +1,6 @@
 # ============================================================
 #  style_analyzer.py — анализирует стиль постов канала
+#                      + получает просмотры через t.me/s/
 # ============================================================
 
 import re
@@ -21,7 +22,6 @@ def fetch_channel_posts_web(channel_id: str, count: int = 15) -> list:
         )
         response.raise_for_status()
 
-        # Извлекаем текст постов из HTML
         pattern = r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>'
         matches = re.findall(pattern, response.text, re.DOTALL)
 
@@ -38,6 +38,52 @@ def fetch_channel_posts_web(channel_id: str, count: int = 15) -> list:
     except Exception as e:
         print(f"No posts fetched: {e}")
         return []
+
+
+def fetch_post_views(channel_id: str) -> dict:
+    """
+    Скрапит t.me/s/{channel} и возвращает словарь {message_id: views_count}.
+    Используется для обновления просмотров в analytics.
+    """
+    try:
+        username = channel_id.lstrip('@')
+        url = f"https://t.me/s/{username}"
+        response = requests.get(
+            url, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramBot)"}
+        )
+        response.raise_for_status()
+        html = response.text
+
+        views_map = {}
+
+        # data-post="channelname/123" ... tgme_widget_message_views>1.2K<
+        msg_blocks = re.findall(
+            r'data-post="[^/]+/(\d+)".*?tgme_widget_message_views[^>]*>([\d\s.,KkMm]+)<',
+            html, re.DOTALL
+        )
+        for msg_id_str, views_str in msg_blocks:
+            try:
+                msg_id = int(msg_id_str)
+                v = views_str.strip().lower().replace(',', '').replace('.', '')
+                if 'k' in v:
+                    views = int(float(v.replace('k', '')) * 1000)
+                elif 'm' in v:
+                    views = int(float(v.replace('m', '')) * 1_000_000)
+                else:
+                    views = int(v) if v.isdigit() else 0
+                if views > 0:
+                    views_map[msg_id] = views
+            except (ValueError, AttributeError):
+                continue
+
+        if views_map:
+            print(f"Views fetched for {len(views_map)} posts")
+        return views_map
+
+    except Exception as e:
+        print(f"Views fetch error: {e}")
+        return {}
 
 
 def analyze_channel_style() -> str:
@@ -108,7 +154,7 @@ def get_style_prompt(style_description: str, performance_hints: dict = None) -> 
 {hints_section}
 ПРАВИЛА:
 - Только на русском языке
-- Пост готов к публикации - без заголовков и вступления
+- Пост готов к публикации - без заголовков и вступлений
 - Точные технические характеристики
 - Интересные факты и история
 - Эмодзи в начале ключевых строк
