@@ -3,100 +3,142 @@
 # ============================================================
 
 import telebot
-import requests
 import io
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID
-from image_finder import search_car_photo, download_photo
+from image_finder import search_car_photo, search_multiple_photos, download_photo
+import analytics
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 
 def publish_post(post_data: dict) -> bool:
     """
-    Публикует пост с фото в Telegram канал.
-    
-    Args:
-        post_data: словарь с ключами 'text', 'car', 'search_query'
-    
-    Returns:
-        True если успешно, False если ошибка
+    Публикует пост в Telegram канал.
+    Поддерживает 1 фото или медиагруппу из 3 фото.
     """
     text = post_data.get("text", "")
     search_query = post_data.get("search_query", "jdm japanese car")
     car = post_data.get("car", "Unknown")
+    photo_count = post_data.get("photo_count", 1)
 
-    print(f"\n📤 Публикую пост про {car}...")
+    print(f%x\nPublishing post about {car} ({photo_count} photos)...")
 
-    # Ищем фото
-    photo_url = search_car_photo(search_query)
+    message_ids = []
 
-    if photo_url:
-        success = _publish_with_photo(text, photo_url)
+    if photo_count >= 3:
+        message_ids = _publish_media_group(text, search_query)
     else:
-        print("⚠️  Фото не найдено, публикую только текст")
-        success = _publish_text_only(text)
+        photo_url = search_car_photo(search_query)
+        msg = _publish_with_photo(text, photo_url) if photo_url else _publish_text_only(text)
+        if msg:
+            message_ids = [msg.message_id]
+
+    success = bool(message_ids)
 
     if success:
-        print(f"✅ Пост про {car} опубликован!")
+        print(f%x\nPost about {car} published! (msg_id: {message_ids})")
+        analytics.save_post(car, message_ids, text, photo_count=photo_count if photo_count >= 3 else 1)
     else:
-        print(f"❌ Не удалось опубликовать пост про {car}")
+        print(f%x\nFailed to publish post about {car}")
 
     return success
 
 
-def _publish_with_photo(text: str, photo_url: str) -> bool:
+def _publish_media_group(text: str, search_query: str) -> list:
+    """Публикует пост с 3 фотографиями как медиагруппу."""
+    photo_urls = search_multiple_photos(search_query, count=3)
+
+    if not photo_urls:
+        print("No photos found, publishing text only")
+        msg = _publish_text_only(text)
+        return [msg.message_id] if msg else []
+
+    try:
+        media = []
+        open_files = []
+
+        for i, url in enumerate(photo_urls[:3]):
+            photo_bytes = download_photo(url)
+            if photo_bytes:
+                f = io.BytesIO(photo_bytes)
+                f.name = f"photo_{i}.jpg"
+                open_files.append(f)
+                if i == 0:
+                    media.append(telebot.types.InputMediaPhoto(
+                        media=f, caption=text[:1024], parse_mode="HTML"
+                    ))
+                else:
+                    media.append(telebot.types.InputMediaPhoto(media=f))
+            else:
+                if i == 0:
+                    media.append(telebot.types.InputMediaPhoto(
+                        media=url, caption=text[:1024], parse_mode="HTML"
+                    ))
+                else:
+                    media.append(telebot.types.InputMediaPhoto(media=url))
+
+        if not media:
+            msg = _publish_text_only(text)
+            return [msg.message_id] if msg else []
+
+        if len(media) == 1:
+            msg = _publish_with_photo(text, photo_urls[0])
+            return [msg.message_id] if msg else []
+
+        messages = bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media)
+        print(f%xMedia group of {len(messages)} photos published")
+        return [m.message_id for m in messages]
+
+    except Exception as e:
+        print(f%xMedia group error: {e}, falling back to single photo")
+        msg = _publish_with_photo(text, photo_urls[0]) if photo_urls else _publish_text_only(text)
+        return [msg.message_id] if msg else []
+
+
+def _publish_with_photo(text: str, photo_url: str):
     """Публикует фото с подписью."""
     try:
-        # Скачиваем фото
         photo_bytes = download_photo(photo_url)
-
         if photo_bytes:
-            # Публикуем как файл (лучшее качество)
             photo_file = io.BytesIO(photo_bytes)
             photo_file.name = "photo.jpg"
-
-            bot.send_photo(
+            return bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL_ID,
                 photo=photo_file,
-                caption=text[:1024],  # Telegram лимит для подписи к фотп
+                caption=text[:1024],
                 parse_mode="HTML",
             )
         else:
-            # Если не скачали — пробуем по URL напрямую
-            bot.send_photo(
+            return bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL_ID,
                 photo=photo_url,
                 caption=text[:1024],
                 parse_mode="HTML",
             )
-        return True
-
     except Exception as e:
-        print(f"⚠️  Ошибка публикации с фото: {e}")
-        # Пробуем без фото
+        print(f"Photo publish error: {e}")
         return _publish_text_only(text)
 
 
-def _publish_text_only(text: str) -> bool:
+def _publish_text_only(text: str):
     """Публикует только текст."""
     try:
-        bot.send_message(
+        return bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
-            text=text[:4096],  # Telegram лимит для текстового сообщения
+            text=text[:4096],
             parse_mode="HTML",
         )
-        return True
     except Exception as e:
-        print(f"❌ Ошибка публикации текста: {e}")
-        return False
+        print(f"Text publish error: {e}")
+        return None
 
 
 def test_connection() -> bool:
     """Проверяет подключение к Telegram."""
     try:
         bot_info = bot.get_me()
-        print(f"✅ Бот подключён: @{bot_info.username}")
+        print(f"Bot connected: @{bot_info.username}")
         return True
     except Exception as e:
-        print(f"❌ Ошибка подключения к Telegram: {e}")
+        print(f"Telegram connection error: {e}")
         return False
