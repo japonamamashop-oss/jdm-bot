@@ -1,196 +1,245 @@
 # ============================================================
-#  bot.py — главный файл запуска бота
-#
-#  Запуск:  python bot.py
-#  Тест:    python bot.py --test
+#  bot.py — полное Telegram-управление через inline-кнопки
 # ============================================================
 
-import sys
-import time
 import telebot
-from datetime import datetime
-
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, POST_INTERVAL_HOURS
-from style_analyzer import analyze_channel_style
-from generator import generate_post_with_retry
-from publisher import publish_post, test_connection
-from scheduler import set_channel_style, start_scheduler, post_now, get_next_post_time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from config import TELEGRAM_BOT_TOKEN
 import analytics
+import bot_settings
+import scheduler
+from style_analyzer import analyze_channel_style
 
-admin_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 
-@admin_bot.message_handler(commands=["start"])
+def _is_admin(msg_or_call) -> bool:
+    chat_id = msg_or_call.chat.id if hasattr(msg_or_call, 'chat') else msg_or_call.message.chat.id
+    admin_id = analytics.get_admin_chat_id()
+    return admin_id is None or chat_id == admin_id
+
+
+def _main_kb() -> InlineKeyboardMarkup:
+    s = bot_settings.load()
+    is_posting = s.get('is_posting', True)
+    pause_label = '⏸ Пауза' if is_posting else '▶️ Возобновить'
+    pause_cb = 'pause' if is_posting else 'resume'
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton('📝 Пост сейчас', callback_data='post_now'),
+        InlineKeyboardButton('📊 Аналитика', callback_data='analytics'),
+    )
+    kb.add(
+        InlineKeyboardButton('⚙️ Настройки', callback_data='settings'),
+        InlineKeyboardButton('📋 Расписание', callback_data='schedule_info'),
+    )
+    kb.add(
+        InlineKeyboardButton(pause_label, callback_data=pause_cb),
+        InlineKeyboardButton('📈 Статус', callback_data='status'),
+    )
+    return kb
+
+
+def _settings_kb() -> InlineKeyboardMarkup:
+    s = bot_settings.load()
+    ppd = s.get('posts_per_day', 1)
+    photos = s.get('photos_per_post', 1)
+    kb = InlineKeyboardMarkup(row_width=3)
+    kb.row(InlineKeyboardButton(f'📅 Постов в день: {ppd}', callback_data='noop'))
+    kb.row(
+        InlineKeyboardButton('➖', callback_data='ppd_dec'),
+        InlineKeyboardButton(f'  {ppd}  ', callback_data='noop'),
+        InlineKeyboardButton('➕', callback_data='ppd_inc'),
+    )
+    kb.row(InlineKeyboardButton('🖼 Фото в посте:', callback_data='noop'))
+    kb.row(
+        InlineKeyboardButton('1 фото' + (' ✓' if photos == 1 else ''), callback_data='photos_1'),
+        InlineKeyboardButton('3 фото' + (' ✓' if photos == 3 else ''), callback_data='photos_3'),
+    )
+    kb.row(InlineKeyboardButton('◀️ Назад в меню', callback_data='main_menu'))
+    return kb
+
+
+def _back_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton('◀️ Назад в меню', callback_data='main_menu'))
+    return kb
+
+
+def _status_text() -> str:
+    s = bot_settings.load()
+    is_posting = s.get('is_posting', True)
+    ppd = s.get('posts_per_day', 1)
+    photos = s.get('photos_per_post', 1)
+    icon = '✅' if is_posting else '⏸'
+    return (
+        f'📊 <b>Статус бота</b>\n\n'
+        f'{icon} Автопостинг: {"Активен" if is_posting else "На паузе"}\n'
+        f'📅 Постов в день: <b>{ppd}</b>\n'
+        f'🖼 Фото в посте: <b>{photos}</b>'
+    )
+
+
+@bot.message_handler(commands=['start'])
 def cmd_start(message):
-    analytics.set_admin_chat_id(message.chat.id)
-    admin_bot.reply_to(
-        message,
-        "JDM Bot started!\n\n"
-        "Commands:\n"
-        "/post - post now\n"
-        "/next - next post time\n"
-        "/status - bot status\n"
-        "/analytics - today analytics",
-        parse_mode="HTML"
+    admin_id = analytics.get_admin_chat_id()
+    if admin_id is None:
+        analytics.set_admin_chat_id(message.chat.id)
+        bot_settings.set_value('admin_chat_id', message.chat.id)
+        intro = '✅ <b>Вы зарегистрированы как администратор!</b>\n\n'
+    else:
+        intro = ''
+    bot.send_message(
+        message.chat.id,
+        f'{intro}🚗 <b>JDM Bot — управление</b>\n\nВыберите действие:',
+        parse_mode='HTML',
+        reply_markup=_main_kb(),
     )
 
 
-@admin_bot.message_handler(commands=["post"])
-def cmd_post(message):
-    analytics.set_admin_chat_id(message.chat.id)
-    admin_bot.reply_to(message, "Generating post...")
-    post_now()
-    admin_bot.reply_to(message, "Post published!")
+@bot.message_handler(commands=['menu'])
+def cmd_menu(message):
+    bot.send_message(message.chat.id, '🚗 <b>Главное меню</b>', parse_mode='HTML', reply_markup=_main_kb())
 
 
-@admin_bot.message_handler(commands=["next"])
-def cmd_next(message):
-    next_time = get_next_post_time()
-    admin_bot.reply_to(
-        message,
-        f"Next post: <b>{next_time}</b>\nInterval: every {POST_INTERVAL_HOURS}h.",
-        parse_mode="HTML"
-    )
-
-
-@admin_bot.message_handler(commands=["status"])
+@bot.message_handler(commands=['status'])
 def cmd_status(message):
-    analytics.set_admin_chat_id(message.chat.id)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    next_time = get_next_post_time()
-    hints = analytics.get_performance_hints()
-
-    hints_text = ""
-    if hints:
-        hints_text = (
-            f"\n\n<b>Style adaptation:</b>\n"
-            f"- Emoji: ~{hints.get('preferred_emoji_count', '?')}\n"
-            f"- Length: ~{hints.get('preferred_length', '?')} chars\n"
-            f"- Multi-photo: {'yes' if hints.get('prefer_multi_photo') else 'no'}"
-        )
-
-    admin_bot.reply_to(
-        message,
-        f"<b>Bot running</b>\n"
-        f"{now}\n"
-        f"Next post: {next_time}\n"
-        f"Channel: {TELEGRAM_CHANNEL_ID}"
-        f"{hints_text}",
-        parse_mode="HTML"
-    )
+    bot.send_message(message.chat.id, _status_text(), parse_mode='HTML', reply_markup=_back_kb())
 
 
-@admin_bot.message_handler(commands=["analytics"])
+@bot.message_handler(commands=['post', 'next'])
+def cmd_post(message):
+    if not _is_admin(message): return
+    bot.send_message(message.chat.id, '⏳ Генерирую и публикую пост...')
+    scheduler.post_now()
+    bot.send_message(message.chat.id, '✅ Пост опубликован!', reply_markup=_main_kb())
+
+
+@bot.message_handler(commands=['pause'])
+def cmd_pause(message):
+    if not _is_admin(message): return
+    bot_settings.set_value('is_posting', False)
+    bot.send_message(message.chat.id, '⏸ Автопостинг поставлен на паузу.', reply_markup=_main_kb())
+
+
+@bot.message_handler(commands=['resume'])
+def cmd_resume(message):
+    if not _is_admin(message): return
+    bot_settings.set_value('is_posting', True)
+    bot.send_message(message.chat.id, '▶️ Автопостинг возобновлён.', reply_markup=_main_kb())
+
+
+@bot.message_handler(commands=['analytics'])
 def cmd_analytics(message):
-    analytics.set_admin_chat_id(message.chat.id)
-    report = analytics.get_daily_report()
-    admin_bot.reply_to(message, report, parse_mode="HTML")
+    bot.send_message(message.chat.id, analytics.get_daily_report(), parse_mode='HTML', reply_markup=_back_kb())
+
+
+@bot.message_handler(commands=['schedule'])
+def cmd_schedule(message):
+    bot.send_message(message.chat.id, scheduler.get_schedule_info(), parse_mode='HTML', reply_markup=_back_kb())
+
+
+@bot.message_handler(commands=['settings'])
+def cmd_settings(message):
+    if not _is_admin(message): return
+    bot.send_message(message.chat.id, '⚙️ <b>Настройки</b>', parse_mode='HTML', reply_markup=_settings_kb())
+
+
+@bot.callback_query_handler(func=lambda c: True)
+def handle_callback(call):
+    data = call.data
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+    if data == 'noop':
+        bot.answer_callback_query(call.id)
+        return
+    if data == 'main_menu':
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text('🚗 <b>Главное меню</b>', chat_id, msg_id, parse_mode='HTML', reply_markup=_main_kb())
+    elif data == 'settings':
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text('⚙️ <b>Настройки</b>', chat_id, msg_id, parse_mode='HTML', reply_markup=_settings_kb())
+    elif data == 'ppd_inc':
+        s = bot_settings.load()
+        new_val = min(s.get('posts_per_day', 1) + 1, 24)
+        bot_settings.set_value('posts_per_day', new_val)
+        bot.answer_callback_query(call.id, f'Постов в день: {new_val}')
+        bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=_settings_kb())
+    elif data == 'ppd_dec':
+        s = bot_settings.load()
+        new_val = max(s.get('posts_per_day', 1) - 1, 1)
+        bot_settings.set_value('posts_per_day', new_val)
+        bot.answer_callback_query(call.id, f'Постов в день: {new_val}')
+        bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=_settings_kb())
+    elif data == 'photos_1':
+        bot_settings.set_value('photos_per_post', 1)
+        bot.answer_callback_query(call.id, '1 фото на пост ✓')
+        bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=_settings_kb())
+    elif data == 'photos_3':
+        bot_settings.set_value('photos_per_post', 3)
+        bot.answer_callback_query(call.id, '3 фото на пост ✓')
+        bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=_settings_kb())
+    elif data == 'pause':
+        bot_settings.set_value('is_posting', False)
+        bot.answer_callback_query(call.id, '⏸ Пауза')
+        bot.edit_message_text('⏸ Автопостинг на паузе.\n\n🚗 <b>Главное меню</b>', chat_id, msg_id, parse_mode='HTML', reply_markup=_main_kb())
+    elif data == 'resume':
+        bot_settings.set_value('is_posting', True)
+        bot.answer_callback_query(call.id, '▶️ Возобновлён!')
+        bot.edit_message_text('▶️ Автопостинг возобновлён.\n\n🚗 <b>Главное меню</b>', chat_id, msg_id, parse_mode='HTML', reply_markup=_main_kb())
+    elif data == 'status':
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(_status_text(), chat_id, msg_id, parse_mode='HTML', reply_markup=_back_kb())
+    elif data == 'schedule_info':
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(scheduler.get_schedule_info(), chat_id, msg_id, parse_mode='HTML', reply_markup=_back_kb())
+    elif data == 'analytics':
+        bot.answer_callback_query(call.id)
+        bot.send_message(chat_id, analytics.get_daily_report(), parse_mode='HTML', reply_markup=_back_kb())
+    elif data == 'post_now':
+        bot.answer_callback_query(call.id, '⏳ Публикую...')
+        bot.send_message(chat_id, '⏳ Генерирую и публикую пост...')
+        scheduler.post_now()
+        bot.send_message(chat_id, '✅ Пост опубликован!', reply_markup=_main_kb())
+    else:
+        bot.answer_callback_query(call.id)
+
+
+@bot.channel_post_handler(content_types=['text', 'photo'])
+def _track_channel_post(message):
+    pass
 
 
 def _handle_reaction_update(update):
-    """Обрабатывает обновления реакций на посты канала."""
     try:
         if hasattr(update, 'message_reaction_count'):
             r = update.message_reaction_count
-            msg_id = r.message_id
-            total = sum(reaction.count for reaction in r.reactions)
+            total = sum(rc.count for rc in r.reactions) if r.reactions else 0
             if total > 0:
-                analytics.add_reactions(msg_id, total)
-                print(f"Reactions: msg {msg_id} = {total}")
+                analytics.add_reactions(r.message_id, total)
         elif hasattr(update, 'message_reaction'):
-            r = update.message_reaction
-            msg_id = r.message_id
-            new_count = len(r.new_reaction)
-            if new_count > 0:
-                analytics.add_reactions(msg_id, new_count)
+            analytics.add_reactions(update.message_reaction.message_id, 1)
     except Exception as e:
-        print(f"Reaction update error: {e}")
+        print(f'Reaction update error: {e}')
 
 
-def run_test_mode():
-    """Тестовый режим."""
-    print("\nTEST MODE")
-    print("=" * 50)
-
-    if not test_connection():
-        print("Check TELEGRAM_BOT_TOKEN in config.py")
-        sys.exit(1)
-
-    print("\nAnalyzing channel style...")
-    style = analyze_channel_style()
-    print(f"\n--- Style ---\n{style[:200]}...\n")
-
-    print("Generating post...")
-    post_data = generate_post_with_retry(style)
-
-    print(f"\n--- Generated post ---")
-    print(f"Car: {post_data['car']}")
-    print(f"Search: {post_data['search_query']}")
-    print(f"Photos: {post_data.get('photo_count', 1)}")
-    print(f"\n{post_data['text']}")
-    print("-" * 50)
-
-    answer = input("\nPublish this post? (y/n): ").strip().lower()
-    if answer == "y":
-        publish_post(post_data)
-    else:
-        print("Cancelled")
-
-    print("\nTest complete!")
+def start_bot():
+    print('Bot started, polling...')
+    bot.infinity_polling(
+        allowed_updates=['message', 'channel_post', 'message_reaction', 'message_reaction_count', 'callback_query'],
+        timeout=60,
+        long_polling_timeout=60,
+    )
 
 
-def run_bot():
-    """Основной режим."""
-    print("\nJDM AUTO POSTER BOT")
-    print("=" * 50)
-    print(f"Channel: {TELEGRAM_CHANNEL_ID}")
-    print(f"Interval: every {POST_INTERVAL_HOURS}h.")
-
-    if not test_connection():
-        print("\nConnection error. Check config.py")
-        sys.exit(1)
-
-    print("\nAnalyzing channel style...")
-    style = analyze_channel_style()
-    set_channel_style(style)
-
-    print("\nPosting first post...")
-    post_now()
-
-    start_scheduler()
-
-    print(f"\nBot running! Next post in {POST_INTERVAL_HOURS}h.")
-    print("Commands: /post /next /status /analytics\n")
-
+if __name__ == '__main__':
+    import threading
+    print('Analyzing channel style...')
     try:
-        @admin_bot.middleware_handler(update_types=['message_reaction_count', 'message_reaction'])
-        def reaction_middleware(bot_instance, update):
-            _handle_reaction_update(update)
-    except Exception:
-        pass
-
-    try:
-        admin_bot.polling(
-            non_stop=True,
-            interval=1,
-            allowed_updates=[
-                "message",
-                "channel_post",
-                "message_reaction",
-                "message_reaction_count",
-            ]
-        )
-    except KeyboardInterrupt:
-        print("\nBot stopped")
-        sys.exit(0)
+        style = analyze_channel_style()
+        scheduler.set_channel_style(style)
     except Exception as e:
-        print(f"\nError: {e}")
-        time.sleep(5)
-        run_bot()
-
-
-if __name__ == "__main__":
-    if "--test" in sys.argv:
-        run_test_mode()
-    else:
-        run_bot()
+        print(f'Style analysis failed: {e}')
+        scheduler.set_channel_style('')
+    scheduler.start_scheduler()
+    start_bot()
