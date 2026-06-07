@@ -4,7 +4,7 @@
 
 import random
 from groq import Groq
-from config import GROQ_API_KEY, JDM_CARS, MULTI_PHOTO_CHANCE
+from config import GROQ_API_KEY, JDM_CARS
 from style_analyzer import get_style_prompt
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -25,27 +25,21 @@ def pick_car() -> str:
     return car
 
 
-def should_use_multi_photo(performance_hints: dict = None) -> bool:
-    """Определяет использовать ли несколько фото (с учётом аналитики)."""
-    if performance_hints and performance_hints.get("prefer_multi_photo"):
-        return random.random() < 0.6  # 60% если аналитика рекомендует
-    return random.random() < MULTI_PHOTO_CHANCE  # 40% по умолчанию
-
-
 def generate_post(style_description: str, car_name: str = None,
-                  performance_hints: dict = None) -> dict:
+                  performance_hints: dict = None,
+                  force_photo_count: int = None) -> dict:
     if not car_name:
         car_name = pick_car()
 
-    use_multi = should_use_multi_photo(performance_hints)
-    photo_count = 3 if use_multi else 1
+    photo_count = force_photo_count if force_photo_count is not None else 1
+    use_multi = photo_count >= 3
 
     style_instruction = get_style_prompt(style_description, performance_hints)
 
     topics = [
         f"общий пост-знакомство с {car_name}: история создания, технические характеристики, культовый статус",
         f"легенды, мифы и интересные факты о {car_name} — то чего не знают большинство",
-        f"почему  {car_name} стала иконой JDM-культуры — влияние аниме, игр, кино",
+        f"почему {car_name} стала иконой JDM-культуры — влияние аниме, игр, кино",
         f"тюнинг-потенциал {car_name}: популярные апгрейды и рекорды мощности",
         f"история {car_name} на треке и в дрифте — гоночное наследие",
         f"стоимость {car_name} тогда и сейчас — почему цены выросли и стоит ли покупать",
@@ -53,17 +47,17 @@ def generate_post(style_description: str, car_name: str = None,
     ]
     topic = random.choice(topics)
 
-    multi_note = ""
+    multi_note = ''
     if use_multi:
-        multi_note = "\nВАЖНО: к посту будет  3 фотографии. Добавь описание внешнего вида машины."
+        multi_note = "\nВАЖНО: к посту будет 3 фотографии. Добавь описание внешнего вида машины."
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model='llama-3.3-70b-versatile',
         messages=[
-            {"role": "system", "content": style_instruction},
+            {'role': 'system', 'content': style_instruction},
             {
-                "role": "user",
-                "content": (
+                'role': 'user',
+                'content': (
                     f"Напиши пост про: {topic}. Машина: {car_name}."
                     f"\nПиши только на русском. Пост готов к публикации."
                     f"{multi_note}"
@@ -74,22 +68,26 @@ def generate_post(style_description: str, car_name: str = None,
     )
 
     post_text = response.choices[0].message.content.strip()
-    car_parts = car_name.lower().replace("-", " ").split()
-    search_query = " ".join(car_parts[:4]) + " jdm japan car"
+    search_query = car_name.strip()
 
     return {
-        "text": post_text,
-        "car": car_name,
-        "search_query": search_query,
-        "photo_count": photo_count,
+        'text': post_text,
+        'car': car_name,
+        'search_query': search_query,
+        'photo_count': photo_count,
     }
 
 
 def generate_post_with_retry(style_description: str, performance_hints: dict = None,
+                              force_photo_count: int = None,
                               max_attempts: int = 3) -> dict:
     for attempt in range(max_attempts):
         try:
-            return generate_post(style_description, performance_hints=performance_hints)
+            return generate_post(
+                style_description,
+                performance_hints=performance_hints,
+                force_photo_count=force_photo_count,
+            )
         except Exception as e:
             print(f"Attempt {attempt + 1}/{max_attempts} failed: {e}")
             if attempt == max_attempts - 1:
