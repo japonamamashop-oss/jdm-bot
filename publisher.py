@@ -15,20 +15,26 @@ def publish_post(post_data: dict) -> bool:
     """
     Публикует пост в Telegram канал.
     Поддерживает 1 фото или медиагруппу из 3 фото.
+    Использует confirmed_photo/confirmed_photos из generator (фото уже проверено).
     """
     text = post_data.get("text", "")
-    search_query = post_data.get("search_query", "jdm japanese car")
+    search_query = post_data.get("search_query", "")
     car = post_data.get("car", "Unknown")
     photo_count = post_data.get("photo_count", 1)
+    confirmed_photo = post_data.get("confirmed_photo")
+    confirmed_photos = post_data.get("confirmed_photos", [])
 
     print(f"\nPublishing post about {car} ({photo_count} photos)...")
 
     message_ids = []
 
     if photo_count >= 3:
-        message_ids = _publish_media_group(text, search_query)
+        if confirmed_photos:
+            message_ids = _publish_media_group_urls(text, confirmed_photos)
+        else:
+            message_ids = _publish_media_group(text, search_query)
     else:
-        photo_url = search_car_photo(search_query)
+        photo_url = confirmed_photo or (search_car_photo(search_query) if search_query else None)
         msg = _publish_with_photo(text, photo_url) if photo_url else _publish_text_only(text)
         if msg:
             message_ids = [msg.message_id]
@@ -44,19 +50,17 @@ def publish_post(post_data: dict) -> bool:
     return success
 
 
-def _publish_media_group(text: str, search_query: str) -> list:
-    """Публикует пост с 3 фотографиями как медиагруппу."""
-    photo_urls = search_multiple_photos(search_query, count=3)
-
+def _publish_media_group_urls(text: str, photo_urls: list) -> list:
+    """Публикует медиагруппу из уже найденных URL (без повторного поиска)."""
     if not photo_urls:
-        print("No photos found, publishing text only")
         msg = _publish_text_only(text)
         return [msg.message_id] if msg else []
-
+    if len(photo_urls) == 1:
+        msg = _publish_with_photo(text, photo_urls[0])
+        return [msg.message_id] if msg else []
     try:
         media = []
         open_files = []
-
         for i, url in enumerate(photo_urls[:3]):
             photo_bytes = download_photo(url)
             if photo_bytes:
@@ -76,23 +80,28 @@ def _publish_media_group(text: str, search_query: str) -> list:
                     ))
                 else:
                     media.append(telebot.types.InputMediaPhoto(media=url))
-
         if not media:
             msg = _publish_text_only(text)
             return [msg.message_id] if msg else []
-
-        if len(media) == 1:
-            msg = _publish_with_photo(text, photo_urls[0])
-            return [msg.message_id] if msg else []
-
         messages = bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media)
         print(f"Media group of {len(messages)} photos published")
         return [m.message_id for m in messages]
-
     except Exception as e:
         print(f"Media group error: {e}, falling back to single photo")
-        msg = _publish_with_photo(text, photo_urls[0]) if photo_urls else _publish_text_only(text)
+        msg = _publish_with_photo(text, photo_urls[0])
         return [msg.message_id] if msg else []
+
+
+def _publish_media_group(text: str, search_query: str) -> list:
+    """Публикует пост с 3 фотографиями как медиагруппу."""
+    photo_urls = search_multiple_photos(search_query, count=3)
+
+    if not photo_urls:
+        print("No photos found, publishing text only")
+        msg = _publish_text_only(text)
+        return [msg.message_id] if msg else []
+
+    return _publish_media_group_urls(text, photo_urls)
 
 
 def _publish_with_photo(text: str, photo_url: str):
