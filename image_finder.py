@@ -1,57 +1,88 @@
 # ============================================================
-#  image_finder.py — ищет красивые фото JDM машин
+#  image_finder.py — поиск фото точно под модель машины
 # ============================================================
 
 import requests
 import random
 from config import UNSPLASH_ACCESS_KEY
 
-
 UNSPLASH_API = "https://api.unsplash.com"
 
-FALLBACK_QUERIES = [
-    "jdm japanese car",
-    "japanese sports car",
-    "modified car japan",
-    "drift car japan",
-    "jdm tuner car",
-]
 
-
-def search_car_photo(query: str) -> str | None:
-    """Ищет одно фото машины."""
-    queries_to_try = [query] + FALLBACK_QUERIES
-    for q in queries_to_try:
-        urls = _fetch_photo_urls(q, count=1)
-        if urls:
-            return urls[0]
+def search_car_photo(search_query: str) -> str | None:
+    """
+    Ищет фото конкретной машины по точному запросу.
+    Пробует несколько вариантов от конкретного к общему.
+    """
+    for query in _build_query_variants(search_query):
+        url = _unsplash_one(query)
+        if url:
+            print(f"   Photo found for query: '{query}'")
+            return url
+    print(f"   No photo found for: '{search_query}'")
     return None
 
 
-def search_multiple_photos(query: str, count: int = 3) -> list:
-    """Ищет несколько разных фото для медиагруппы."""
-    urls = _fetch_photo_urls(query, count=count + 5)
-    result = urls[:count]
+def search_multiple_photos(search_query: str, count: int = 3) -> list:
+    """
+    Возвращает несколько различных фото одной машины.
+    Строго для той же модели — без смешения разных машин.
+    """
+    urls = []
 
-    for fallback in FALLBACK_QUERIES:
-        if len(result) >= count:
+    for query in _build_query_variants(search_query):
+        if len(urls) >= count:
             break
-        extra = _fetch_photo_urls(fallback, count=2)
-        for u in extra:
-            if u not in result:
-                result.append(u)
+        results = _unsplash_many(query, count=count + 2)
+        for url in results:
+            if url not in urls:
+                urls.append(url)
+                if len(urls) >= count:
+                    break
 
-    return result[:count]
+    if urls:
+        print(f"   Found {len(urls)} photos for: '{search_query}'")
+    else:
+        print(f"   No photos found for: '{search_query}'")
+
+    return urls[:count]
 
 
-def _fetch_photo_urls(query: str, count: int = 10) -> list:
-    """Делает запрос к Unsplash API, возвращает список URL."""
+# ─── Internal helpers ─────────────────────────────────────────────────────────
+
+def _build_query_variants(search_query: str) -> list:
+    """
+    Строит список поисковых запросов от самого конкретного к общему.
+    Гарантирует, что фото соответствует модели машины в тексте.
+    """
+    base = search_query.strip()
+    base_clean = base.replace(" car", "").replace("car ", "").strip()
+
+    return [
+        f"{base} jdm",
+        f"{base} automobile",
+        base,
+        f"{base_clean} japan car",
+        "jdm japanese sports car",
+    ]
+
+
+def _unsplash_one(query: str) -> str | None:
+    """Возвращает одно случайное фото из результатов поиска."""
+    results = _unsplash_many(query, count=8)
+    return random.choice(results) if results else None
+
+
+def _unsplash_many(query: str, count: int = 8) -> list:
+    """Возвращает список URL фото из Unsplash по запросу."""
+    if not UNSPLASH_ACCESS_KEY:
+        return []
     try:
-        response = requests.get(
+        resp = requests.get(
             f"{UNSPLASH_API}/search/photos",
             params={
                 "query": query,
-                "per_page": min(30, max(count * 2, 15)),
+                "per_page": min(count + 5, 30),
                 "orientation": "landscape",
                 "order_by": "relevant",
             },
@@ -61,45 +92,24 @@ def _fetch_photo_urls(query: str, count: int = 10) -> list:
             },
             timeout=10,
         )
-        response.raise_for_status()
-        data = response.json()
-
-        results = data.get("results", [])
-        if not results:
+        if resp.status_code != 200:
             return []
-
+        results = resp.json().get("results", [])
         top = results[:min(15, len(results))]
         random.shuffle(top)
-
-        urls = []
-        for photo in top[:count]:
-            url = photo["urls"].get("regular") or photo["urls"].get("full")
-            if url:
-                urls.append(url)
-
-        if urls:
-            print(f"Found {len(urls)} photos for '{query[:30]}'")
-        return urls
-
-    except requests.exceptions.RequestException as e:
-        print(f"Unsplash API error: {e}")
+        return [r["urls"].get("regular") or r["urls"].get("full")
+                for r in top[:count] if "urls" in r]
+    except Exception as e:
+        print(f"   Unsplash error for '{query}': {e}")
         return []
-    except (KeyError, IndexError) as e:
-        print(f"Unsplash parse error: {e}")
-        return []
-
-
-def _fetch_photo_url(query: str) -> str | None:
-    urls = _fetch_photo_urls(query, count=1)
-    return urls[0] if urls else None
 
 
 def download_photo(url: str) -> bytes | None:
-    """Скачивает фото по URL и возвращает байты."""
+    """Скачивает байты фото по URL."""
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return response.content
-    except requests.exceptions.RequestException as e:
-        print(f"Download error: {e}")
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:
+        print(f"   Photo download error: {e}")
         return None
