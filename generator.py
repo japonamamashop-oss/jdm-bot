@@ -47,34 +47,34 @@ def generate_post(style_description: str, car_name: str = None,
     ]
     topic = random.choice(topics)
 
-    multi_note = ''
+    multi_note = ""
     if use_multi:
         multi_note = "\nВАЖНО: к посту будет 3 фотографии. Добавь описание внешнего вида машины."
 
     response = client.chat.completions.create(
-        model='llama-3.3-70b-versatile',
+        model="llama-3.1-8b-instant",
         messages=[
-            {'role': 'system', 'content': style_instruction},
+            {"role": "system", "content": style_instruction},
             {
-                'role': 'user',
-                'content': (
+                "role": "user",
+                "content": (
                     f"Напиши пост про: {topic}. Машина: {car_name}."
                     f"\nПиши только на русском. Пост готов к публикации."
                     f"{multi_note}"
                 )
             }
         ],
-        max_tokens=900,
+        max_tokens=700,
     )
 
     post_text = response.choices[0].message.content.strip()
     search_query = car_name.strip()
 
     return {
-        'text': post_text,
-        'car': car_name,
-        'search_query': search_query,
-        'photo_count': photo_count,
+        "text": post_text,
+        "car": car_name,
+        "search_query": search_query,
+        "photo_count": photo_count,
     }
 
 
